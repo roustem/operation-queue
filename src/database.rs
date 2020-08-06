@@ -2,12 +2,17 @@
 #![allow(unused_imports)]
 
 use rusqlite::{params, Connection};
-use std::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::{
+    mpsc,
+    oneshot::{self, error::TryRecvError},
+};
 
 #[derive(Debug)]
 pub enum Error {
     Save,
     GetValue,
+    Send,
+    Recv,
 }
 
 #[derive(Debug)]
@@ -50,46 +55,46 @@ impl<'conn> Transaction<'conn> {
 struct Operation {
     name: &'static str,
     block: DatabaseOperation,
-    result_passback: Sender<OperationResult<ResponseType>>,
+    result_passback: oneshot::Sender<OperationResult<ResponseType>>,
 }
 
 #[derive(Debug)]
 pub struct Db {
-    sender: std::sync::mpsc::Sender<Operation>,
-    tx_queue: std::thread::JoinHandle<()>,
+    sender: mpsc::UnboundedSender<Operation>,
+    tx_queue: tokio::task::JoinHandle<()>,
 }
 
 impl Db {
-    pub fn new() -> Self {
-        let (sender, receiver) =
-            mpsc::channel::<Operation>();
+    pub async fn new() -> Self {
+        let (sender, mut receiver) = mpsc::unbounded_channel::<Operation>();
 
-        let thread_builder = std::thread::Builder::new().name("tx-queue".into());
-        let tx_queue = thread_builder
-            .spawn(move || {
-                let conn = Connection::open_in_memory().unwrap();
-                Self::create_schema(&conn);
+        let tx_queue = tokio::spawn(async move {
+            let conn = Connection::open_in_memory().unwrap();
+            Self::create_schema(&conn);
 
-                while let Ok(op) = receiver.recv() {
-                    let _ = conn.execute_batch("BEGIN TRANSACTION");
-                    let tx = Transaction { conn: &conn };
-                    println!("Running transaction '{}' on thread {}", op.name, std::thread::current().name().unwrap());
-                    match (op.block)(tx) {
-                        Ok(resp) => {
-                            let _ = conn.execute_batch("COMMIT");
-                            op.result_passback.send(Ok(resp)).unwrap();
-
-                        }
-                        Err(e) => {
-                            let _ = conn.execute_batch("ROLLBACK");
-                            println!("Transaction {} failed, rolling back!", op.name);
-                            op.result_passback.send(Err(e)).unwrap();
-                        }
+            while let Some(op) = receiver.recv().await {
+                let _ = conn.execute_batch("BEGIN TRANSACTION");
+                let tx = Transaction { conn: &conn };
+                println!(
+                    "Running transaction '{}' on thread {}",
+                    op.name,
+                    std::thread::current().name().unwrap()
+                );
+                match (op.block)(tx) {
+                    Ok(resp) => {
+                        let _ = conn.execute_batch("COMMIT");
+                        op.result_passback.send(Ok(resp)).unwrap();
+                    }
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK");
+                        println!("Transaction {} failed, rolling back!", op.name);
+                        op.result_passback.send(Err(e)).unwrap();
                     }
                 }
-                let _ = conn.close();
-            })
-            .unwrap();
+            }
+
+            let _ = conn.close();
+        });
 
         Self { sender, tx_queue }
     }
@@ -102,19 +107,30 @@ impl Db {
         }
     }
 
-    pub fn transaction(&self, name: &'static str, op: DatabaseOperation) -> OperationResult<ResponseType> {
-        let (passback, rx) = std::sync::mpsc::channel();
+    pub async fn transaction(
+        &self,
+        name: &'static str,
+        op: DatabaseOperation,
+    ) -> OperationResult<ResponseType> {
+        let (passback, mut rx) = oneshot::channel();
         let op = Operation {
             block: op,
             name,
             result_passback: passback,
         };
 
-        self.sender.send(op).unwrap();
-        rx.recv().unwrap()
+        self.sender.send(op).map_err(|_| Error::Send)?;
+        loop {
+            match rx.try_recv() {
+                Ok(res) => return res,
+                Err(TryRecvError::Empty) => continue,
+                Err(TryRecvError::Closed) => break Err(Error::Recv),
+            }
+        }
     }
 
-    pub fn wait_to_complete(self) {
-        self.tx_queue.join().unwrap();
+    pub async fn wait_to_complete(self) {
+        drop(self.sender);
+        self.tx_queue.await.unwrap()
     }
 }
