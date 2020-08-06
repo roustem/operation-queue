@@ -5,3 +5,4 @@ authors = ["Roustem <roustem@1password.com>"]
 edition = "2018"
 
 [dependencies]
+rusqlite = { version = "0.23" }

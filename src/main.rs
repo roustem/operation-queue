@@ -1,20 +1,27 @@
 use std::thread;
+mod database;
+use database::Db;
 
 fn main() {
-    let operations: [Box<dyn Fn(&str) + Send>; 2] = [Box::new(|param| {
-        println!("first closure({}) {:?}", param, thread::current().name());
-    }), Box::new(|param| {
-        println!("second closure({}) {:?}", param, thread::current().name());
-    })];
-
+    // Db::transaction(move |tx: Transaction| {
+    //     tx.get_accounts();
+    //     tx.save_vault().map_err();
+    //     Ok(())
+    //     return Err()
+    // });
     println!("thread: {:?}", thread::current().name());
 
-    let thread_builder = thread::Builder::new().name("operation-queue".into());
-    let handle = thread_builder.spawn(move || {
-        for op in &operations {
-            op("hello");
-        }
-    }).unwrap();
+    let db = Db::new();
+    db.perform(Box::new(|tx| {
+        tx.save_value(1, "value 1");
+        println!("transaction #1 ({}) {:?}", tx.get_value(1), thread::current().name());
+    }));
 
-    handle.join().unwrap();
+    db.perform(Box::new(|tx| {
+        tx.save_value(2, "value 2");
+        println!("transaction #2 ({}) {:?}", tx.get_value(2), thread::current().name());
+    }));
+
+
+    db.wait_to_complete();
 }
