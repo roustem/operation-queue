@@ -14,12 +14,15 @@ fn main() {
     let db = Db::new();
     db.perform(Box::new(|tx| {
         tx.save_value(1, "value 1");
-        println!("transaction #1 ({}) {:?}", tx.get_value(1), thread::current().name());
+        println!("transaction #1 ({}) {:?}", tx.get_value(1).unwrap(), thread::current().name());
+        Ok(())
     }));
 
+
     db.perform(Box::new(|tx| {
-        tx.save_value(2, "value 2");
-        println!("transaction #2 ({}) {:?}", tx.get_value(2), thread::current().name());
+        tx.save_value(2, "value too awesome");
+        println!("transaction #2 ({}) {:?}", tx.get_value(2).unwrap(), thread::current().name());
+        Ok(())
     }));
 
 
