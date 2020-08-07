@@ -16,19 +16,20 @@ pub enum Error {
 }
 
 #[derive(Debug)]
-pub enum ResponseType {
+pub enum OperationResponse {
+    None,
     String(String),
 }
 
-pub type OperationResult<T> = std::result::Result<T, Error>;
-pub type DatabaseOperation = Box<dyn Fn(Transaction) -> OperationResult<ResponseType> + Send>;
+pub type Result = std::result::Result<OperationResponse, Error>;
+pub type DatabaseOperation = Box<dyn Fn(Transaction) -> Result + Send>;
 
 pub struct Transaction<'conn> {
     conn: &'conn Connection,
 }
 
 impl<'conn> Transaction<'conn> {
-    pub fn get_value(&self, id: i64) -> OperationResult<ResponseType> {
+    pub fn get_value(&self, id: i64) -> Result {
         let out = self
             .conn
             .query_row(
@@ -38,24 +39,24 @@ impl<'conn> Transaction<'conn> {
             )
             .map_err(|_| Error::GetValue)?;
 
-        Ok(ResponseType::String(out))
+        Ok(OperationResponse::String(out))
     }
 
-    pub fn save_value(&self, id: i64, value: &str) -> OperationResult<()> {
+    pub fn save_value(&self, id: i64, value: &str) -> Result {
         self.conn
             .execute(
                 "INSERT INTO config (id, value) VALUES (?1, ?2)",
                 params![id, value],
             )
             .map_err(|_| Error::Save)
-            .map(|_| ())
+            .map(|_| OperationResponse::None)
     }
 }
 
 struct Operation {
     name: &'static str,
     block: DatabaseOperation,
-    result_passback: oneshot::Sender<OperationResult<ResponseType>>,
+    result_passback: oneshot::Sender<Result>,
 }
 
 #[derive(Debug)]
@@ -111,7 +112,7 @@ impl Db {
         &self,
         name: &'static str,
         op: DatabaseOperation,
-    ) -> OperationResult<ResponseType> {
+    ) -> Result {
         let (passback, mut rx) = oneshot::channel();
         let op = Operation {
             block: op,
